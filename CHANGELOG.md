@@ -4,13 +4,9 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
-## [3.0.0](https://github.com/piotr-agier/google-drive-mcp/compare/v2.2.0...v3.0.0) (2026-04-21)
+## [2.3.0](https://github.com/piotr-agier/google-drive-mcp/compare/v2.2.0...v2.3.0) (2026-04-22)
 
-### Breaking Changes
-
-- **Multi-account support** — `tokens.json` has migrated to a versioned multi-account schema (v2). Existing single-account installs are upgraded automatically on first boot; a `tokens.json.v1-backup-<timestamp>` is left alongside for rollback. Downgrading to 2.x after running 3.x will not read the new file without manual restoration of the backup.
-- **Tool input schemas** — every non-admin tool now carries an optional top-level `account` parameter. MCP clients that cache schemas should refresh. Existing calls that omit `account` continue to work against the default/sole account.
-- **Admin-tool access** — `authGetStatus`, `authListScopes`, and `authTestFileAccess` no longer accept the `account` parameter (they always report on the active account); the new `manage_accounts` tool is the supported surface for per-account operations.
+Substantial internal refactor to introduce **multi-account support**: one running server can now hold OAuth credentials for several Google accounts (e.g. personal + Workspace) and route each tool call to the right identity. The change is strictly additive at the contract level — existing single-account users upgrade with no re-consent, no config changes, and no user-visible behavior change.
 
 ### Features
 
@@ -20,10 +16,15 @@ All notable changes to this project will be documented in this file.
 - **auth:** atomic-rename writes for `tokens.json` plus a process-wide write queue that serializes concurrent refreshes from different accounts.
 - **auth:** per-alias refresh dedupe — N concurrent tool calls on the same account fire at most one refresh request to Google.
 
-### Migration
+### Token file format
 
-- **Automatic.** First boot on 3.0 reads a pre-existing v1 `tokens.json`, writes the v2 equivalent in place, saves the old file as `tokens.json.v1-backup-<timestamp>`, and registers the migrated credentials under the alias `default`. The account is marked `pendingIdentity: true` — its email and Google `sub` are populated the next time you re-add or re-consent.
-- **Reserved aliases:** `default`, `all`, `*`, `stdio`, `service-account`, `external-token`, `test` — cannot be used with `manage_accounts add`.
+`tokens.json` now uses a versioned v2 schema that keys multiple accounts by alias. The upgrade from v1 is **automatic** on first boot: the v2 file is written in place, the previous file is preserved as `tokens.json.v1-backup-<timestamp>` in case you need to roll back, and the migrated credentials are registered under the alias `default` (which is reserved — you cannot re-create it with `manage_accounts add`). The record is initially marked `pendingIdentity: true`; its email and Google `sub` populate the next time you re-consent.
+
+Note: downgrading to 2.2.x or earlier after running 2.3.0+ requires manually restoring the `.v1-backup-*` file in place of the v2 `tokens.json`. The new file is not readable by older versions.
+
+### Reserved aliases
+
+`default`, `all`, `*`, `stdio`, `service-account`, `external-token`, `test` cannot be used with `manage_accounts add`.
 
 ### Known Limitations
 
