@@ -115,7 +115,8 @@ const UploadFileSchema = z.object({
   name: z.string().optional(),
   parentFolderId: z.string().optional(),
   mimeType: z.string().optional(),
-  convertToGoogleFormat: z.boolean().optional()
+  convertToGoogleFormat: z.boolean().optional(),
+  overwrite: z.boolean().optional().default(true)
 });
 
 const DownloadFileSchema = z.object({
@@ -368,7 +369,7 @@ export const toolDefinitions: ToolDefinition[] = [
   },
   {
     name: "uploadFile",
-    description: "Upload a local file (any type: image, audio, video, PDF, etc.) to Google Drive",
+    description: "Upload a local file (any type: image, audio, video, PDF, etc.) to Google Drive. If a file with the same name already exists in the target folder, its content is overwritten in place by default (overwrite=true), keeping the file ID/link/sharing.",
     inputSchema: {
       type: "object",
       properties: {
@@ -376,7 +377,8 @@ export const toolDefinitions: ToolDefinition[] = [
         name: { type: "string", description: "File name in Drive (defaults to local filename)" },
         parentFolderId: { type: "string", description: "Parent folder ID or path (e.g., '/Work/Projects'). Creates folders if needed. Defaults to root." },
         mimeType: { type: "string", description: "MIME type (auto-detected from extension if omitted)" },
-        convertToGoogleFormat: { type: "boolean", description: "Convert uploaded file to Google Workspace format (e.g., .docx to Google Doc, .xlsx to Google Sheet, .pptx to Google Slides). Defaults to false." }
+        convertToGoogleFormat: { type: "boolean", description: "Convert uploaded file to Google Workspace format (e.g., .docx to Google Doc, .xlsx to Google Sheet, .pptx to Google Slides). Defaults to false." },
+        overwrite: { type: "boolean", description: "If a file with the same name already exists in the target folder, overwrite its content in place (keeps ID/link/sharing) instead of creating a duplicate. Defaults to true." }
       },
       required: ["localPath"]
     }
@@ -1218,30 +1220,69 @@ export async function handleTool(
 
       ctx.log('Uploading file', { localPath: data.localPath, name: uploadName, mimeType: detectedMime, convertToGoogle: !!targetMimeType, size: stats.size });
 
-      const requestBody: any = {
-        name: uploadName,
-        parents: [parentId]
-      };
-      if (targetMimeType) {
-        requestBody.mimeType = targetMimeType;
+      // Look for an existing same-name, non-trashed file in the target folder.
+      // Shared-drive flags are mandatory: without them existing files on a
+      // shared drive won't match and overwrite=true would create duplicates.
+      let existingId: string | undefined;
+      if (data.overwrite !== false) {
+        const escaped = uploadName.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+        const q = `name = '${escaped}' and '${parentId}' in parents and trashed = false`;
+        const found = await ctx.getDrive().files.list({
+          q,
+          fields: 'files(id, name, modifiedTime)',
+          orderBy: 'modifiedTime desc',
+          pageSize: 10,
+          supportsAllDrives: true,
+          includeItemsFromAllDrives: true,
+          corpora: 'allDrives'
+        });
+        const matches = found.data.files || [];
+        if (matches.length > 0) {
+          existingId = matches[0].id || undefined;
+          if (matches.length > 1) {
+            ctx.log('uploadFile: multiple same-name files found; updating most recently modified', { count: matches.length, name: uploadName, parentId });
+          }
+        }
       }
 
-      const file = await ctx.getDrive().files.create({
-        requestBody,
-        media: {
-          mimeType: detectedMime,
-          body: createReadStream(data.localPath)
-        },
-        fields: 'id, name, size, mimeType, webViewLink',
-        supportsAllDrives: true
-      });
+      let file;
+      if (existingId) {
+        // In-place overwrite: replace content only. Do not touch parents (no move),
+        // which preserves file ID, sharing, links and comments (new revision).
+        file = await ctx.getDrive().files.update({
+          fileId: existingId,
+          media: {
+            mimeType: detectedMime,
+            body: createReadStream(data.localPath)
+          },
+          fields: 'id, name, size, mimeType, webViewLink',
+          supportsAllDrives: true
+        });
+      } else {
+        const requestBody: any = {
+          name: uploadName,
+          parents: [parentId]
+        };
+        if (targetMimeType) {
+          requestBody.mimeType = targetMimeType;
+        }
+        file = await ctx.getDrive().files.create({
+          requestBody,
+          media: {
+            mimeType: detectedMime,
+            body: createReadStream(data.localPath)
+          },
+          fields: 'id, name, size, mimeType, webViewLink',
+          supportsAllDrives: true
+        });
+      }
 
-      ctx.log('File uploaded successfully', { fileId: file.data?.id });
+      ctx.log('File uploaded successfully', { fileId: file.data?.id, mode: existingId ? 'updated-in-place' : 'created' });
       return {
         content: [{
           type: "text",
           text: [
-            `Uploaded: ${file.data?.name || fileName}`,
+            existingId ? `Updated existing file in place: ${file.data?.name || fileName}` : `Created new file: ${file.data?.name || fileName}`,
             `ID: ${file.data?.id || 'unknown'}`,
             `Size: ${file.data?.size || stats.size} bytes`,
             `Type: ${file.data?.mimeType || detectedMime}`,
